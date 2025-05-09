@@ -8,6 +8,7 @@ use anyhow::{bail, ensure};
 use ffmpeg::format::Pixel;
 use itertools::{chain, Itertools};
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::filter::LevelFilter;
 
 use crate::concat::ConcatMethod;
 use crate::encoder::Encoder;
@@ -74,6 +75,7 @@ pub struct EncodeArgs {
 
   pub verbosity: Verbosity,
   pub log_file: PathBuf,
+  pub log_level: LevelFilter,
   pub resume: bool,
   pub keep: bool,
   pub force: bool,
@@ -123,6 +125,10 @@ impl EncodeArgs {
     if self.encoder == Encoder::x265 && self.concat != ConcatMethod::MKVMerge {
       bail!("mkvmerge is required for concatenating x265, as x265 outputs raw HEVC bitstream files without the timestamps correctly set, which FFmpeg cannot concatenate \
 properly into a mkv file. Specify mkvmerge as the concatenation method by setting `--concat mkvmerge`.");
+    }
+
+    if self.encoder == Encoder::vpx && self.concat != ConcatMethod::MKVMerge {
+      warn!("mkvmerge is recommended for concatenating vpx, as vpx outputs with incorrect frame rates, which we can only resolve using mkvmerge. Specify mkvmerge as the concatenation method by setting `--concat mkvmerge`.");
     }
 
     if self.chunk_method == ChunkMethod::LSMASH {
@@ -376,7 +382,7 @@ pub(crate) fn insert_noise_table_params(
   encoder: Encoder,
   video_params: &mut Vec<String>,
   table: &Path,
-) {
+) -> anyhow::Result<()> {
   match encoder {
     Encoder::aom => {
       video_params.retain(|param| !param.starts_with("--denoise-noise-level="));
@@ -404,6 +410,8 @@ pub(crate) fn insert_noise_table_params(
       video_params.push("--photon-noise-table".to_string());
       video_params.push(table.to_str().unwrap().to_string());
     }
-    _ => unimplemented!("This encoder does not support grain synth through av1an"),
+    _ => bail!("This encoder does not support grain synth through av1an"),
   }
+
+  Ok(())
 }

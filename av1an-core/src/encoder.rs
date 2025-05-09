@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::borrow::Cow;
 use std::cmp;
 use std::fmt::Display;
@@ -32,7 +35,7 @@ pub enum Encoder {
   x265,
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub(crate) fn parse_svt_av1_version(version: &[u8]) -> Option<(u32, u32, u32)> {
   let v_idx = memchr::memchr(b'v', version)?;
   let s = version.get(v_idx + 1..)?;
@@ -49,29 +52,6 @@ pub(crate) fn parse_svt_av1_version(version: &[u8]) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
   } else {
     None
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use crate::encoder::parse_svt_av1_version;
-
-  #[test]
-  fn svt_av1_parsing() {
-    let test_cases = [
-      ("SVT-AV1 v0.8.7-333-g010c1881 (release)", Some((0, 8, 7))),
-      ("SVT-AV1 v0.9.0-dirty (debug)", Some((0, 9, 0))),
-      ("SVT-AV1 v1.2.0 (release)", Some((1, 2, 0))),
-      ("SVT-AV1 v3.2.1 (release)", Some((3, 2, 1))),
-      ("SVT-AV1 v3.2.11 (release)", Some((3, 2, 11))),
-      ("SVT-AV1 v0.8.11 (release)", Some((0, 8, 11))),
-      ("SVT-AV1 v0.8.11-333-g010c1881 (release)", Some((0, 8, 11))),
-      ("invalid", None),
-    ];
-
-    for (s, ans) in test_cases {
-      assert_eq!(parse_svt_av1_version(s.as_bytes()), ans);
-    }
   }
 }
 
@@ -333,6 +313,7 @@ impl Encoder {
           "--end-usage=q",
           "--cq-level=30",
           "--disable-kf",
+          "--kf-max-dist=9999"
         ];
 
         if cols > 1 || rows > 1 {
@@ -381,6 +362,7 @@ impl Encoder {
           "--row-mt=1",
           "--auto-alt-ref=6",
           "--disable-kf",
+          "--kf-max-dist=9999"
         ];
 
         if cols > 1 || rows > 1 {
@@ -668,6 +650,7 @@ impl Encoder {
         "--sb-size=64",
         "--min-partition-size=32",
         "--disable-kf",
+        "--kf-max-dist=9999"
       ],
       Self::rav1e => inplace_vec![
         "rav1e",
@@ -698,6 +681,8 @@ impl Encoder {
         "--end-usage=q",
         format!("--cq-level={q}"),
         "--row-mt=1",
+        "--disable-kf",
+        "--kf-max-dist=9999"
       ],
       Self::svt_av1 => {
         if *USE_OLD_SVT_AV1 {

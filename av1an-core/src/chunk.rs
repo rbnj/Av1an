@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -85,82 +88,9 @@ impl Chunk {
         write_grain_table(&grain_table, &[params])?;
       }
 
-      insert_noise_table_params(self.encoder, &mut self.video_params, &grain_table);
+      insert_noise_table_params(self.encoder, &mut self.video_params, &grain_table)?;
     }
 
     Ok(())
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_chunk_name_1() {
-    let ch = Chunk {
-      temp: "none".to_owned(),
-      index: 1,
-      input: Input::Video {
-        path: "test.mkv".into(),
-      },
-      source_cmd: vec!["".into()],
-      output_ext: "ivf".to_owned(),
-      start_frame: 0,
-      end_frame: 5,
-      frame_rate: 30.0,
-      tq_cq: None,
-      passes: 1,
-      video_params: vec![],
-      encoder: Encoder::x264,
-      noise_size: (None, None),
-      ignore_frame_mismatch: false,
-    };
-    assert_eq!("00001", ch.name());
-  }
-  #[test]
-  fn test_chunk_name_10000() {
-    let ch = Chunk {
-      temp: "none".to_owned(),
-      index: 10000,
-      input: Input::Video {
-        path: "test.mkv".into(),
-      },
-      source_cmd: vec!["".into()],
-      output_ext: "ivf".to_owned(),
-      start_frame: 0,
-      end_frame: 5,
-      frame_rate: 30.0,
-      tq_cq: None,
-      passes: 1,
-      video_params: vec![],
-      encoder: Encoder::x264,
-      noise_size: (None, None),
-      ignore_frame_mismatch: false,
-    };
-    assert_eq!("10000", ch.name());
-  }
-
-  #[test]
-  fn test_chunk_output() {
-    let ch = Chunk {
-      temp: "d".to_owned(),
-      index: 1,
-      input: Input::Video {
-        path: "test.mkv".into(),
-      },
-      source_cmd: vec!["".into()],
-      output_ext: "ivf".to_owned(),
-      start_frame: 0,
-      end_frame: 5,
-      frame_rate: 30.0,
-      tq_cq: None,
-      passes: 1,
-      video_params: vec![],
-      encoder: Encoder::x264,
-      noise_size: (None, None),
-      ignore_frame_mismatch: false,
-    };
-    assert_eq!("d/encode/00001.ivf", ch.output());
   }
 }

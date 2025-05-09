@@ -15,7 +15,7 @@ use smallvec::{smallvec, SmallVec};
 use crate::scenes::Scene;
 use crate::{into_smallvec, progress_bar, Encoder, Input, ScenecutMethod, Verbosity};
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 #[allow(clippy::too_many_arguments)]
 pub fn av_scenechange_detect(
   input: &Input,
@@ -35,7 +35,7 @@ pub fn av_scenechange_detect(
     } else {
       eprintln!("Scene detection");
     }
-    progress_bar::init_progress_bar(total_frames as u64, 0);
+    progress_bar::init_progress_bar(total_frames as u64, 0, None);
   }
 
   let input2 = input.clone();
@@ -204,7 +204,7 @@ pub fn scene_detect(
   Ok(scenes)
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 fn build_decoder(
   input: &Input,
   encoder: Encoder,

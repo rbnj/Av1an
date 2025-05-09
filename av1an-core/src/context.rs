@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
@@ -17,6 +17,7 @@ use anyhow::{bail, Context};
 use av1_grain::TransferFunction;
 use crossbeam_utils;
 use itertools::Itertools;
+use num_traits::cast::ToPrimitive;
 use rand::prelude::SliceRandom;
 use rand::rng;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -51,7 +52,7 @@ pub struct Av1anContext {
 }
 
 impl Av1anContext {
-  #[tracing::instrument]
+  #[tracing::instrument(level = "debug")]
   pub fn new(mut args: EncodeArgs) -> anyhow::Result<Self> {
     args.validate()?;
     let mut this = Self {
@@ -65,14 +66,14 @@ impl Av1anContext {
   }
 
   /// Initialize logging routines and create temporary directories
-  #[tracing::instrument]
+  #[tracing::instrument(level = "debug")]
   fn initialize(&mut self) -> anyhow::Result<()> {
     ffmpeg::init()?;
     ffmpeg::util::log::set_level(ffmpeg::util::log::level::Level::Fatal);
 
     if !self.args.resume && Path::new(&self.args.temp).is_dir() {
       fs::remove_dir_all(&self.args.temp)
-        .with_context(|| format!("Failed to remove temporary directory {:?}", &self.args.temp))?;
+        .with_context(|| format!("Failed to remove temporary directory {}", self.args.temp))?;
     }
 
     create_dir!(Path::new(&self.args.temp))?;
@@ -91,22 +92,22 @@ impl Av1anContext {
         (true, true) => {}
         (false, true) => {
           info!(
-            "resume was set but done.json does not exist in temporary directory {:?}",
-            &self.args.temp
+            "resume was set but done.json does not exist in temporary directory {}",
+            self.args.temp
           );
           self.args.resume = false;
         }
         (true, false) => {
           info!(
-            "resume was set but chunks.json does not exist in temporary directory {:?}",
-            &self.args.temp
+            "resume was set but chunks.json does not exist in temporary directory {}",
+            self.args.temp
           );
           self.args.resume = false;
         }
         (false, false) => {
           info!(
-            "resume was set but neither chunks.json nor done.json exist in temporary directory {:?}",
-            &self.args.temp
+            "resume was set but neither chunks.json nor done.json exist in temporary directory {}",
+            self.args.temp
           );
           self.args.resume = false;
         }
@@ -141,7 +142,7 @@ impl Av1anContext {
     Ok(())
   }
 
-  #[tracing::instrument]
+  #[tracing::instrument(skip(self))]
   pub fn encode_file(&mut self) -> anyhow::Result<()> {
     let initial_frames = get_done()
       .done
@@ -190,7 +191,8 @@ impl Av1anContext {
         };
 
     let res = self.args.input.resolution()?;
-    let fps = self.args.input.frame_rate()?;
+    let fps_ratio = self.args.input.frame_rate()?;
+    let fps = fps_ratio.to_f64().unwrap();
     let format = self.args.input.pixel_format()?;
     let tfc = self
       .args
@@ -222,12 +224,13 @@ impl Av1anContext {
 
     let (chunk_queue, total_chunks) = self.load_or_gen_chunk_queue(&splits)?;
 
+    let mut chunks_done = 0;
     if self.args.resume {
-      let chunks_done = get_done().done.len();
+      chunks_done = get_done().done.len();
       info!(
         "encoding resumed with {}/{} chunks completed ({} remaining)",
         chunks_done,
-        chunk_queue.len() + chunks_done,
+        total_chunks,
         chunk_queue.len()
       );
     }
@@ -270,53 +273,50 @@ impl Av1anContext {
       }
       self.args.workers = cmp::min(self.args.workers, chunk_queue.len());
 
-      if std::io::stderr().is_terminal() {
-        eprintln!(
-          "{}{} {} {}{} {} {}{} {} {}{} {}\n{}: {}",
-          Color::Green.bold().paint("Q"),
-          Color::Green.paint("ueue"),
-          Color::Green.bold().paint(format!("{}", chunk_queue.len())),
-          Color::Blue.bold().paint("W"),
-          Color::Blue.paint("orkers"),
-          Color::Blue.bold().paint(format!("{}", self.args.workers)),
-          Color::Purple.bold().paint("E"),
-          Color::Purple.paint("ncoder"),
-          Color::Purple.bold().paint(format!("{}", self.args.encoder)),
-          Color::Purple.bold().paint("P"),
-          Color::Purple.paint("asses"),
-          Color::Purple.bold().paint(format!("{}", self.args.passes)),
-          Style::default().bold().paint("Params"),
-          Style::default()
-            .dimmed()
-            .paint(self.args.video_params.join(" "))
-        );
-      } else {
-        eprintln!(
-          "Queue {} Workers {} Encoder {} Passes {}\nParams: {}",
-          chunk_queue.len(),
-          self.args.workers,
-          self.args.encoder,
-          self.args.passes,
-          self.args.video_params.join(" ")
-        );
-      }
+      info!(
+        "\n{}{} {} {}{} {} {}{} {} {}{} {}\n{}: {}",
+        Color::Green.bold().paint("Q"),
+        Color::Green.paint("ueue"),
+        Color::Green.bold().paint(format!("{}", chunk_queue.len())),
+        Color::Blue.bold().paint("W"),
+        Color::Blue.paint("orkers"),
+        Color::Blue.bold().paint(format!("{}", self.args.workers)),
+        Color::Purple.bold().paint("E"),
+        Color::Purple.paint("ncoder"),
+        Color::Purple.bold().paint(format!("{}", self.args.encoder)),
+        Color::Purple.bold().paint("P"),
+        Color::Purple.paint("asses"),
+        Color::Purple.bold().paint(format!("{}", self.args.passes)),
+        Style::default().bold().paint("Params"),
+        Style::default()
+          .dimmed()
+          .paint(self.args.video_params.join(" "))
+      );
 
       if self.args.verbosity == Verbosity::Normal {
-        init_progress_bar(self.frames as u64, initial_frames as u64);
+        init_progress_bar(
+          self.frames as u64,
+          initial_frames as u64,
+          Some((chunks_done as u32, total_chunks as u32)),
+        );
         reset_bar_at(initial_frames as u64);
       } else if self.args.verbosity == Verbosity::Verbose {
         init_multi_progress_bar(
           self.frames as u64,
           self.args.workers,
-          total_chunks,
           initial_frames as u64,
+          (chunks_done as u32, total_chunks as u32),
         );
         reset_mp_bar_at(initial_frames as u64);
       }
 
-      if !get_done().done.is_empty() {
-        let frame_rate = self.args.input.frame_rate()?;
-        update_progress_bar_estimates(frame_rate, self.frames, self.args.verbosity);
+      if chunks_done > 0 {
+        update_progress_bar_estimates(
+          fps,
+          self.frames,
+          self.args.verbosity,
+          (chunks_done as u32, total_chunks as u32),
+        );
       }
 
       let broker = Broker {
@@ -326,7 +326,7 @@ impl Av1anContext {
 
       let (tx, rx) = mpsc::channel();
       let handle = s.spawn(|_| {
-        broker.encoding_loop(tx, self.args.set_thread_affinity);
+        broker.encoding_loop(tx, self.args.set_thread_affinity, total_chunks as u32);
       });
 
       // Queue::encoding_loop only sends a message if there was an error (meaning a chunk crashed)
@@ -358,6 +358,7 @@ impl Av1anContext {
             self.args.output_file.as_ref(),
             self.args.encoder,
             total_chunks,
+            fps_ratio,
           )?;
         }
         ConcatMethod::FFmpeg => {
@@ -429,7 +430,7 @@ impl Av1anContext {
     Ok(())
   }
 
-  #[tracing::instrument]
+  #[tracing::instrument(level = "debug")]
   fn read_queue_files(source_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut queue_files = fs::read_dir(source_path)
       .with_context(|| format!("Failed to read queue files from source path {source_path:?}"))?
@@ -944,7 +945,7 @@ impl Av1anContext {
       self.args.chroma_noise,
     )?;
     if let Some(ref tq) = self.args.target_quality {
-      tq.per_shot_target_quality_routine(&mut chunk)?;
+      tq.per_shot_target_quality_routine(&mut chunk, None)?;
     }
     Ok(chunk)
   }
@@ -1012,7 +1013,7 @@ impl Av1anContext {
   }
 
   fn create_video_queue_vs(&self, scenes: &[Scene], vs_script: &Path) -> Vec<Chunk> {
-    let frame_rate = self.args.input.frame_rate().unwrap();
+    let frame_rate = self.args.input.frame_rate().unwrap().to_f64().unwrap();
     let chunk_queue: Vec<Chunk> = scenes
       .iter()
       .enumerate()
@@ -1028,7 +1029,7 @@ impl Av1anContext {
 
   fn create_video_queue_select(&self, scenes: &[Scene]) -> Vec<Chunk> {
     let input = self.args.input.as_video_path();
-    let frame_rate = self.args.input.frame_rate().unwrap();
+    let frame_rate = self.args.input.frame_rate().unwrap().to_f64().unwrap();
 
     let chunk_queue: Vec<Chunk> = scenes
       .iter()
@@ -1052,7 +1053,7 @@ impl Av1anContext {
 
   fn create_video_queue_segment(&self, scenes: &[Scene]) -> anyhow::Result<Vec<Chunk>> {
     let input = self.args.input.as_video_path();
-    let frame_rate = self.args.input.frame_rate().unwrap();
+    let frame_rate = self.args.input.frame_rate().unwrap().to_f64().unwrap();
 
     debug!("Splitting video");
     segment(
@@ -1094,7 +1095,7 @@ impl Av1anContext {
 
   fn create_video_queue_hybrid(&self, scenes: &[Scene]) -> anyhow::Result<Vec<Chunk>> {
     let input = self.args.input.as_video_path();
-    let frame_rate = self.args.input.frame_rate().unwrap();
+    let frame_rate = self.args.input.frame_rate().unwrap().to_f64().unwrap();
 
     let keyframes = crate::ffmpeg::get_keyframes(input).unwrap();
 
@@ -1148,7 +1149,7 @@ impl Av1anContext {
     Ok(chunk_queue)
   }
 
-  #[tracing::instrument]
+  #[tracing::instrument(level = "debug")]
   fn create_chunk_from_segment(
     &self,
     index: usize,

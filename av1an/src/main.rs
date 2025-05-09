@@ -1,17 +1,15 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::thread::available_parallelism;
 use std::{panic, process};
 
 use ::ffmpeg::format::Pixel;
-use ansi_term::{Color, Style};
 use anyhow::{anyhow, bail, ensure, Context};
 use av1an_core::concat::ConcatMethod;
 use av1an_core::context::Av1anContext;
 use av1an_core::encoder::Encoder;
-use av1an_core::logging::init_logging;
-use av1an_core::progress_bar::{get_first_multi_progress_bar, get_progress_bar};
+use av1an_core::logging::{init_logging, DEFAULT_LOG_LEVEL};
 use av1an_core::settings::{EncodeArgs, InputPixelFormat, PixelFormat};
 use av1an_core::target_quality::{adapt_probing_rate, TargetQuality};
 use av1an_core::util::read_in_dir;
@@ -20,11 +18,10 @@ use av1an_core::{
   SplitMethod, Verbosity,
 };
 use clap::{value_parser, Parser};
-use flexi_logger::writers::LogWriter;
-use flexi_logger::{Level, LevelFilter};
+use num_traits::cast::ToPrimitive;
 use once_cell::sync::OnceCell;
 use path_abs::{PathAbs, PathInfo};
-use tracing::{instrument, warn};
+use tracing::{instrument, level_filters::LevelFilter, warn};
 
 fn main() -> anyhow::Result<()> {
   let orig_hook = panic::take_hook();
@@ -162,7 +159,7 @@ fn version() -> &'static str {
 pub struct CliOpts {
   /// Input file to encode
   ///
-  /// Can be a video or vapoursynth (.py, .vpy) script.
+  /// Can be a video or VapourSynth (.py, .vpy) script.
   #[clap(short, required = true)]
   pub input: Vec<PathBuf>,
 
@@ -188,7 +185,9 @@ pub struct CliOpts {
   #[clap(long)]
   pub verbose: bool,
 
-  /// Log file location [default: <temp dir>/log.log]
+  /// Log file location under ./logs [default: ./logs/av1an.log]
+  ///
+  /// Must be a relative path. Prepending with ./logs is optional.
   #[clap(short, long)]
   pub log_file: Option<String>,
 
@@ -203,7 +202,7 @@ pub struct CliOpts {
   /// debug: Designates lower priority information.
   ///
   /// trace: Designates very low priority, often extremely verbose, information. Includes rav1e scenechange decision info.
-  #[clap(long, default_value_t = LevelFilter::Debug, ignore_case = true)]
+  #[clap(long, default_value_t = DEFAULT_LOG_LEVEL, ignore_case = true)]
   // "off" is also an allowed value for LevelFilter but we just disable the user from setting it
   pub log_level: LevelFilter,
 
@@ -262,11 +261,11 @@ pub struct CliOpts {
   #[clap(short, long, help_heading = "Scene Detection")]
   pub scenes: Option<PathBuf>,
 
-  /// Maximum scene length, in seconds
+  /// Run the scene detection only before exiting
   ///
-  /// If both frames and seconds are specified, then the number of frames will take priority.
-  #[clap(long, default_value_t = 10.0, help_heading = "Scene Detection")]
-  pub extra_split_sec: f64,
+  /// Requires a scene file with --scenes.
+  #[clap(long, requires("scenes"), help_heading = "Scene Detection")]
+  pub sc_only: bool,
 
   /// Method used to determine chunk boundaries
   ///
@@ -284,16 +283,6 @@ pub struct CliOpts {
   #[clap(long, default_value_t = ScenecutMethod::Standard, help_heading = "Scene Detection")]
   pub sc_method: ScenecutMethod,
 
-  /// Run the scene detection only before exiting
-  ///
-  /// Requires a scene file with --scenes.
-  #[clap(long, requires("scenes"), help_heading = "Scene Detection")]
-  pub sc_only: bool,
-
-  /// Perform scene detection with this pixel format
-  #[clap(long, help_heading = "Scene Detection")]
-  pub sc_pix_format: Option<Pixel>,
-
   /// Optional downscaling for scene detection
   ///
   /// Specify as the desired maximum height to scale to (e.g. "720" to downscale to
@@ -304,6 +293,10 @@ pub struct CliOpts {
   #[clap(long, help_heading = "Scene Detection")]
   pub sc_downscale_height: Option<usize>,
 
+  /// Perform scene detection with this pixel format
+  #[clap(long, help_heading = "Scene Detection")]
+  pub sc_pix_format: Option<Pixel>,
+
   /// Maximum scene length
   ///
   /// When a scenecut is found whose distance to the previous scenecut is greater than the value
@@ -311,6 +304,12 @@ pub struct CliOpts {
   /// to 0 to disable adding extra splits.
   #[clap(short = 'x', long, help_heading = "Scene Detection")]
   pub extra_split: Option<usize>,
+
+  /// Maximum scene length, in seconds
+  ///
+  /// If both frames and seconds are specified, then the number of frames will take priority.
+  #[clap(long, default_value_t = 10.0, help_heading = "Scene Detection")]
+  pub extra_split_sec: f64,
 
   /// Minimum number of frames for a scenecut
   #[clap(long, default_value_t = 24, help_heading = "Scene Detection")]
@@ -323,10 +322,6 @@ pub struct CliOpts {
   #[clap(long, help_heading = "Scene Detection")]
   pub force_keyframes: Option<String>,
 
-  /// Ignore any detected mismatch between scene frame count and encoder frame count
-  #[clap(long, help_heading = "Encoding")]
-  pub ignore_frame_mismatch: bool,
-
   /// Video encoder to use
   #[clap(short, long, default_value_t = Encoder::aom, help_heading = "Encoding")]
   pub encoder: Encoder,
@@ -334,8 +329,8 @@ pub struct CliOpts {
   /// Parameters for video encoder
   ///
   /// These parameters are for the encoder binary directly, so the ffmpeg syntax cannot be used.
-  /// For example, CRF is specified in ffmpeg via "-crf <crf>", but the x264 binary takes this
-  /// value with double dashes, as in "--crf <crf>". See the --help output of each encoder for
+  /// For example, CRF is specified in ffmpeg via "-crf <CRF>", but the x264 binary takes this
+  /// value with double dashes, as in "--crf <CRF>". See the --help output of each encoder for
   /// a list of valid options. This list of parameters will be merged into Av1an's default set
   /// of encoder parameters.
   #[clap(short, long, allow_hyphen_values = true, help_heading = "Encoding")]
@@ -358,6 +353,15 @@ pub struct CliOpts {
   #[clap(long, help_heading = "Encoding")]
   pub tile_auto: bool,
 
+  /// FFmpeg filter options
+  #[clap(
+    short = 'f',
+    long = "ffmpeg",
+    allow_hyphen_values = true,
+    help_heading = "Encoding"
+  )]
+  pub ffmpeg_filter_args: Option<String>,
+
   /// Audio encoding parameters (ffmpeg syntax)
   ///
   /// If not specified, "-c:a copy" is used.
@@ -379,14 +383,9 @@ pub struct CliOpts {
   #[clap(short, long, allow_hyphen_values = true, help_heading = "Encoding")]
   pub audio_params: Option<String>,
 
-  /// FFmpeg filter options
-  #[clap(
-    short = 'f',
-    long = "ffmpeg",
-    allow_hyphen_values = true,
-    help_heading = "Encoding"
-  )]
-  pub ffmpeg_filter_args: Option<String>,
+  /// Ignore any detected mismatch between scene frame count and encoder frame count
+  #[clap(long, help_heading = "Encoding")]
+  pub ignore_frame_mismatch: bool,
 
   /// Method used for piping exact ranges of frames to the encoder
   ///
@@ -452,6 +451,10 @@ pub struct CliOpts {
   #[clap(long, help_heading = "Encoding")]
   pub photon_noise: Option<u8>,
 
+  /// Adds chroma grain synthesis to the grain table generated by `--photon-noise`. (Default: false)
+  #[clap(long, help_heading = "Encoding", requires = "photon_noise")]
+  pub chroma_noise: bool,
+
   /// Manually set the width for the photon noise table.
   #[clap(long, help_heading = "Encoding")]
   pub photon_noise_width: Option<u32>,
@@ -459,10 +462,6 @@ pub struct CliOpts {
   /// Manually set the height for the photon noise table.
   #[clap(long, help_heading = "Encoding")]
   pub photon_noise_height: Option<u32>,
-
-  /// Adds chroma grain synthesis to the grain table generated by `--photon-noise`. (Default: false)
-  #[clap(long, help_heading = "Encoding", requires = "photon_noise")]
-  pub chroma_noise: bool,
 
   /// Determines method used for concatenating encoded chunks and audio into output file
   ///
@@ -478,7 +477,7 @@ pub struct CliOpts {
   ///
   /// ivf - Experimental concatenation method implemented in av1an itself to concatenate to an ivf
   /// file (which only supports VP8, VP9, and AV1, and does not support audio).
-  #[clap(short, long, default_value_t = ConcatMethod::FFmpeg, help_heading = "Encoding")]
+  #[clap(short, long, default_value_t = ConcatMethod::MKVMerge, help_heading = "Encoding")]
   pub concat: ConcatMethod,
 
   /// FFmpeg pixel format
@@ -605,7 +604,7 @@ pub struct CliOpts {
 }
 
 impl CliOpts {
-  #[tracing::instrument]
+  #[tracing::instrument(level = "debug")]
   pub fn target_quality_params(
     &self,
     temp_dir: String,
@@ -683,7 +682,7 @@ pub(crate) fn resolve_file_paths(path: &Path) -> anyhow::Result<Box<dyn Iterator
 }
 
 /// Returns vector of Encode args ready to be fed to encoder
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
   let input_paths = &*args.input;
 
@@ -704,6 +703,14 @@ pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
     let input = Input::from((input, args.vspipe_args.clone()));
     let input_sc = args.input_sc.as_ref().map(|path| Input::from((path, args.vspipe_args.clone())));
 
+    let verbosity = if args.quiet {
+      Verbosity::Quiet
+    } else if args.verbose {
+      Verbosity::Verbose
+    } else {
+      Verbosity::Normal
+    };
+
     let video_params = if let Some(args) = args.video_params.as_ref() {
       shlex::split(args).ok_or_else(|| anyhow!("Failed to split video encoder arguments"))?
     } else {
@@ -717,10 +724,25 @@ pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
     // TODO make an actual constructor for this
     let arg = EncodeArgs {
       log_file: if let Some(log_file) = args.log_file.as_ref() {
-        Path::new(&format!("{log_file}.log")).to_owned()
+        let log_path = Path::new(log_file);
+        if log_path.starts_with("/") || log_path.is_absolute() {
+          Err(anyhow!("Log file path must be relative"))?
+        }
+        let absolute_path = std::path::absolute(log_path).unwrap();
+        let log_path = absolute_path
+          .strip_prefix(std::env::current_dir().unwrap())
+          .unwrap()
+          .strip_prefix("logs")
+          .unwrap_or(
+            absolute_path
+              .strip_prefix(std::env::current_dir().unwrap())
+              .unwrap(),
+          );
+        log_path.to_path_buf()
       } else {
-        Path::new(&temp).join("log.log")
+        Path::new("av1an.log").to_owned()
       },
+      log_level: args.log_level,
       ffmpeg_filter_args: if let Some(args) = args.ffmpeg_filter_args.as_ref() {
         shlex::split(args).ok_or_else(|| anyhow!("Failed to split ffmpeg filter arguments"))?
       } else {
@@ -773,7 +795,7 @@ pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
         Some(x) => Some(x),
         // Make sure it's at least 10 seconds, unless specified by user
         None => match input.frame_rate() {
-          Ok(fps) => Some((fps * args.extra_split_sec) as usize),
+          Ok(fps) => Some((fps.to_f64().unwrap() * args.extra_split_sec) as usize),
           Err(_) => Some(240_usize),
         },
       },
@@ -819,13 +841,7 @@ pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
       vmaf_res: args.vmaf_res.clone(),
       vmaf_threads: args.vmaf_threads,
       vmaf_filter: args.vmaf_filter.clone(),
-      verbosity: if args.quiet {
-        Verbosity::Quiet
-      } else if args.verbose {
-        Verbosity::Verbose
-      } else {
-        Verbosity::Normal
-      },
+      verbosity,
       workers: args.workers,
       tiles: (1, 1), // default value; will be adjusted if tile_auto set
       tile_auto: args.tile_auto,
@@ -881,70 +897,21 @@ pub fn parse_cli(args: CliOpts) -> anyhow::Result<Vec<EncodeArgs>> {
   Ok(valid_args)
 }
 
-#[derive(Debug)]
-pub struct StderrLogger {
-  level: Level,
-}
-
-impl LogWriter for StderrLogger {
-  fn write(
-    &self,
-    _now: &mut flexi_logger::DeferredNow,
-    record: &flexi_logger::Record,
-  ) -> std::io::Result<()> {
-    if record.level() > self.level {
-      return Ok(());
-    }
-
-    let style = if io::stderr().is_terminal() {
-      match record.level() {
-        Level::Error => Style::default().fg(Color::Fixed(196)).bold(),
-        Level::Warn => Style::default().fg(Color::Fixed(208)).bold(),
-        Level::Info => Style::default().bold(),
-        Level::Debug => Style::default().dimmed(),
-        _ => Style::default(),
-      }
-    } else {
-      Style::default()
-    };
-
-    let msg = style.paint(format!("{}", record.args()));
-
-    macro_rules! create_format_args {
-      () => {
-        format_args!(
-          "{} [{}] {}",
-          style.paint(format!("{}", record.level())),
-          record.module_path().unwrap_or("<unnamed>"),
-          msg
-        )
-      };
-    }
-
-    if let Some(pbar) = get_first_multi_progress_bar() {
-      pbar.println(std::fmt::format(create_format_args!()));
-    } else if let Some(pbar) = get_progress_bar() {
-      pbar.println(std::fmt::format(create_format_args!()));
-    } else {
-      eprintln!("{}", create_format_args!());
-    }
-
-    Ok(())
-  }
-
-  fn flush(&self) -> std::io::Result<()> {
-    Ok(())
-  }
-}
-
 #[instrument]
 pub fn run() -> anyhow::Result<()> {
-  init_logging();
+  let cli_options = CliOpts::parse();
+  let args = parse_cli(cli_options)?;
+  let first_arg = args.first().unwrap();
 
-  let cli_args = CliOpts::parse();
-
-  //let log_level = cli_args.log_level;
-  let args = parse_cli(cli_args)?;
+  init_logging(
+    match first_arg.verbosity {
+      Verbosity::Quiet => LevelFilter::WARN,
+      Verbosity::Normal => LevelFilter::INFO,
+      Verbosity::Verbose => LevelFilter::INFO,
+    },
+    first_arg.log_file.clone(),
+    first_arg.log_level,
+  );
 
   for arg in args {
     Av1anContext::new(arg)?.encode_file()?;

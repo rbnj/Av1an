@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs::{self, DirEntry, File};
 use std::io::Write;
@@ -9,6 +12,7 @@ use anyhow::{anyhow, Context};
 use av_format::buffer::AccReader;
 use av_format::demuxer::{Context as DemuxerContext, Event};
 use av_format::muxer::{Context as MuxerContext, Writer};
+use av_format::rational::Rational64;
 use av_ivf::demuxer::IvfDemuxer;
 use av_ivf::muxer::IvfMuxer;
 use path_abs::{PathAbs, PathInfo};
@@ -36,7 +40,7 @@ impl Display for ConcatMethod {
   }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub fn sort_files_by_filename(files: &mut [PathBuf]) {
   files.sort_unstable_by_key(|x| {
     // If the temp directory follows the expected format of 00000.ivf, 00001.ivf, etc.,
@@ -50,7 +54,7 @@ pub fn sort_files_by_filename(files: &mut [PathBuf]) {
   });
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub fn ivf(input: &Path, out: &Path) -> anyhow::Result<()> {
   let mut files: Vec<PathBuf> = read_in_dir(input)?.collect();
 
@@ -139,7 +143,7 @@ pub fn ivf(input: &Path, out: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 fn read_encoded_chunks(encode_dir: &Path) -> anyhow::Result<Vec<DirEntry>> {
   Ok(
     fs::read_dir(encode_dir)
@@ -148,12 +152,13 @@ fn read_encoded_chunks(encode_dir: &Path) -> anyhow::Result<Vec<DirEntry>> {
   )
 }
 
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub fn mkvmerge(
   temp_dir: &Path,
   output: &Path,
   encoder: Encoder,
   num_chunks: usize,
+  output_fps: Rational64,
 ) -> anyhow::Result<()> {
   // mkvmerge does not accept UNC paths on Windows
   #[cfg(windows)]
@@ -199,6 +204,7 @@ pub fn mkvmerge(
     encoder,
     &fix_path(output.to_str().unwrap()),
     audio_file.as_deref(),
+    output_fps,
   );
 
   let mut options_json = File::create(options_path)?;
@@ -226,19 +232,26 @@ pub fn mkvmerge(
 }
 
 /// Create mkvmerge options.json
-#[tracing::instrument]
+#[tracing::instrument(level = "debug")]
 pub fn mkvmerge_options_json(
   num: usize,
   encoder: Encoder,
   output: &str,
   audio: Option<&str>,
+  output_fps: Rational64,
 ) -> String {
   let mut file_string = String::with_capacity(64 + 12 * num);
   write!(file_string, "[\"-o\", {output:?}").unwrap();
   if let Some(audio) = audio {
     write!(file_string, ", {audio:?}").unwrap();
   }
-  file_string.push_str(", \"[\"");
+  write!(
+    file_string,
+    ", \"--default-duration\", \"0:{}/{}fps\", \"[\"",
+    output_fps.numer(),
+    output_fps.denom()
+  )
+  .unwrap();
   for i in 0..num {
     write!(file_string, ", \"{i:05}.{}\"", encoder.output_extension()).unwrap();
   }
@@ -247,8 +260,8 @@ pub fn mkvmerge_options_json(
   file_string
 }
 
-/// Concatenates using ffmpeg (does not work with x265)
-#[tracing::instrument]
+/// Concatenates using ffmpeg (does not work with x265, and may have incorrect FPS with vpx)
+#[tracing::instrument(level = "debug")]
 pub fn ffmpeg(temp: &Path, output: &Path) -> anyhow::Result<()> {
   fn write_concat_file(temp_folder: &Path) -> anyhow::Result<()> {
     let concat_file = temp_folder.join("concat");
